@@ -1,6 +1,16 @@
 # Teleoperation System
 Repository with the source code of the teleoperation system
 
+## System components 
+
+#### KUKA control
+
+https://github.com/VAlikV/kuka_fri_control.git
+
+#### Haptic 
+
+https://github.com/VAlikV/haptic_control.git
+
 ## Experiments
 
 1. Teleoperation
