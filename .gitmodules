@@ -1,0 +1,6 @@
+[submodule "haptic_control"]
+	path = haptic_control
+	url = https://github.com/VAlikV/haptic_control.git
+[submodule "kuka_fri_control"]
+	path = kuka_fri_control
+	url = https://github.com/VAlikV/kuka_fri_control.git
