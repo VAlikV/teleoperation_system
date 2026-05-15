@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt
 
 URDF_PATH = Path(__file__).resolve().parents[1] / "robot" / "iiwa.urdf"
 EE_FRAME_NAME = "iiwa_link_ee"
+TARGET_INDEX = 0
+CURRENT_INDEX = 1
+TORQUE_INDEX = 3
 
 
 def build_robot_model(urdf_path=URDF_PATH):
@@ -56,6 +59,54 @@ def end_effector_pose(q, model=None, data=None, ee_frame_name=EE_FRAME_NAME):
     return position, rotation
 
 
+def end_effector_jacobian(q, model=None, data=None, ee_frame_name=EE_FRAME_NAME):
+    if model is None:
+        model, data = build_robot_model()
+    elif data is None:
+        data = model.createData()
+
+    q = np.asarray(q, dtype=float)
+    if q.shape != (model.nq,):
+        raise ValueError(f"Expected q with shape ({model.nq},), got {q.shape}")
+
+    frame_id = model.getFrameId(ee_frame_name)
+    if frame_id >= len(model.frames):
+        raise ValueError(f"Frame {ee_frame_name!r} not found in model")
+
+    pin.forwardKinematics(model, data, q)
+    pin.updateFramePlacements(model, data)
+    return pin.computeFrameJacobian(
+        model,
+        data,
+        q,
+        frame_id,
+        pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+    )
+
+
+def estimate_end_effector_wrench(q, tau, model=None, data=None, ee_frame_name=EE_FRAME_NAME):
+    """
+    Оценивает wrench на end-effector из tau = J(q)^T F.
+
+    Для 7DOF манипулятора система переопределена: J.T имеет размер 7x6.
+    Поэтому используется least-squares решение, а первые 3 компоненты wrench
+    в Pinocchio соответствуют линейной силе в world-aligned координатах.
+    """
+    if model is None:
+        model, data = build_robot_model()
+    elif data is None:
+        data = model.createData()
+
+    tau = np.asarray(tau, dtype=float)
+    if tau.shape != (model.nv,):
+        raise ValueError(f"Expected tau with shape ({model.nv},), got {tau.shape}")
+
+    jacobian = end_effector_jacobian(q, model, data, ee_frame_name)
+    wrench, *_ = np.linalg.lstsq(jacobian.T, tau, rcond=None)
+    force = wrench[:3]
+    return wrench, force
+
+
 def set_axes_equal(ax, points):
     min_values = points.min(axis=0)
     max_values = points.max(axis=0)
@@ -79,50 +130,112 @@ def interpolate_positions(source_time, source_positions, query_time):
     )
 
 
+def interpolate_vectors(source_time, source_vectors, query_time):
+    return np.column_stack(
+        [
+            np.interp(query_time, source_time, source_vectors[:, axis])
+            for axis in range(source_vectors.shape[1])
+        ]
+    )
+
+
+def estimate_forces(current_time, current_q, torque_time, torque, model, data):
+    valid_torque = (
+        (torque_time >= current_time.min())
+        & (torque_time <= current_time.max())
+    )
+    torque_time = torque_time[valid_torque]
+    torque = torque[valid_torque]
+
+    if torque.size == 0:
+        return torque_time, np.empty((0, 3))
+
+    q_on_torque_time = interpolate_vectors(current_time, current_q, torque_time)
+    forces = []
+    for q, tau in zip(q_on_torque_time, torque):
+        _, force = estimate_end_effector_wrench(q, tau, model, data)
+        forces.append(force)
+
+    return torque_time, np.array(forces)
+
+
 if __name__ == "__main__":
 
     model, data = build_robot_model()
 
-    lines = np.genfromtxt("graphs/Cubes.txt", delimiter=",")
+    lines = np.genfromtxt("graphs/Table.txt", delimiter=",")[1000:]
+
+    print(len(lines))
 
     current = []
+    current_q = []
     current_time = []
     target = []
     target_time = []
+    torque = []
+    torque_time = []
 
     for l in lines:
-        q = l[2:9]
-        T_ee = forward_kinematics(q, model, data)
-        position = T_ee[:3, 3]
-        if l[0] == 1:
+        index = int(l[0])
+        values = l[2:9]
+        if index == TARGET_INDEX:
+            T_ee = forward_kinematics(values, model, data)
+            position = T_ee[:3, 3]
             target.append(position)
             target_time.append(l[1])
-        elif l[0] == 2:
+        elif index == CURRENT_INDEX:
+            T_ee = forward_kinematics(values, model, data)
+            position = T_ee[:3, 3]
             current.append(position)
+            current_q.append(values)
             current_time.append(l[1])
+        elif index == TORQUE_INDEX:
+            torque.append(values)
+            torque_time.append(l[1])
 
 
     current = np.array(current)
+    current_q = np.array(current_q)
     current_time = np.array(current_time)
     target = np.array(target)
     target_time = np.array(target_time)
+    torque = np.array(torque)
+    torque_time = np.array(torque_time)
 
     if current.size == 0:
-        raise ValueError("No current trajectory points found: expected rows with marker 2")
+        raise ValueError(f"No current trajectory points found: expected rows with marker {CURRENT_INDEX}")
     if target.size == 0:
-        raise ValueError("No target trajectory points found: expected rows with marker 1")
+        raise ValueError(f"No target trajectory points found: expected rows with marker {TARGET_INDEX}")
 
     valid_current = (
         (current_time >= target_time.min())
         & (current_time <= target_time.max())
     )
     current = current[valid_current]
+    current_q = current_q[valid_current]
     current_time = current_time[valid_current]
 
     target_on_current_time = interpolate_positions(target_time, target, current_time)
     error = current - target_on_current_time
     error_norm = np.linalg.norm(error, axis=1)
     time = current_time - current_time[0]
+
+    force_time = np.array([])
+    forces = np.empty((0, 3))
+    force_plot_time = np.array([])
+    if torque.size:
+        force_time, forces = estimate_forces(
+            current_time,
+            current_q,
+            torque_time,
+            torque,
+            model,
+            data,
+        )
+        force_norm = np.linalg.norm(forces, axis=1)
+        visible_force = force_norm > 1e-12
+        force_time = force_time[visible_force]
+        forces = forces[visible_force]
 
     fig = plt.figure(0)
     ax = fig.add_subplot(111, projection="3d")
@@ -159,6 +272,29 @@ if __name__ == "__main__":
             linewidth=0.8,
         )
 
+    if forces.size:
+        force_positions = interpolate_positions(current_time, current, force_time)
+        force_norm = np.linalg.norm(forces, axis=1)
+        force_plot_time = force_time - current_time[0]
+
+        force_step = max(len(forces) // 40, 1)
+        trajectory_span = np.ptp(np.vstack((current, target)), axis=0).max()
+        max_arrow_length = max(trajectory_span * 0.12, 0.03)
+        scale = max_arrow_length / force_norm.max()
+        ax.quiver(
+            force_positions[::force_step, 0],
+            force_positions[::force_step, 1],
+            force_positions[::force_step, 2],
+            forces[::force_step, 0] * scale,
+            forces[::force_step, 1] * scale,
+            forces[::force_step, 2] * scale,
+            color="tab:purple",
+            linewidth=1.1,
+            arrow_length_ratio=0.25,
+            normalize=False,
+            label="estimated force",
+        )
+
     ax.scatter(
         current[0, 0],
         current[0, 1],
@@ -193,6 +329,26 @@ if __name__ == "__main__":
     plt.ylabel("Error, m")
     plt.grid(True)
     plt.legend()
+
+    if forces.size:
+        plt.figure(2)
+        plt.plot(force_plot_time, forces[:, 0], label="Fx")
+        plt.plot(force_plot_time, forces[:, 1], label="Fy")
+        plt.plot(force_plot_time, forces[:, 2], label="Fz")
+        plt.plot(
+            force_plot_time,
+            np.linalg.norm(forces, axis=1),
+            color="black",
+            linewidth=2,
+            label="|F|",
+        )
+        plt.title("Estimated end-effector force")
+        plt.xlabel("Time")
+        plt.ylabel("Force")
+        plt.grid(True)
+        plt.legend()
+    else:
+        print(f"No force vectors plotted: expected torque rows with marker {TORQUE_INDEX}")
 
     print(f"Mean position error: {error_norm.mean():.6f} m")
     print(f"Max position error: {error_norm.max():.6f} m")

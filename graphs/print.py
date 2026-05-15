@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-data = np.genfromtxt("graphs/ForceTorque.txt", delimiter=",")
+data = np.genfromtxt("graphs/Table.txt", delimiter=",")
 
 print(data)
 
@@ -21,13 +21,14 @@ derivative_target_q = np.gradient(target_q)
 print(target_q.shape)
 
 plt.figure(0)
-plt.plot(t_target_q[:], target_q[:,6])
-plt.plot(t_current_q[:], current_q[:,6])
+plt.plot(t_target_q[:], target_q[:,0])
+plt.plot(t_current_q[:], current_q[:,0])
 plt.legend(["target position joint 0", "current position joint 0"])
 
-plt.figure(2)
+print(current_torque)
+plt.figure(1)
 plt.plot(t_current_torque, current_torque)
-plt.legend(["0","1","2","3","4","5","6"])
+# plt.legend(["0","1","2","3","4","5","6"])
 
 # plt.figure(3)
 # plt.plot(t_target_q[:], derivative_target_q[0][:,0])
